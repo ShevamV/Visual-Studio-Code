@@ -9,12 +9,14 @@ const majorNodeVersion = parseInt(nodeVersion[1]);
 const minorNodeVersion = parseInt(nodeVersion[2]);
 const patchNodeVersion = parseInt(nodeVersion[3]);
 
-if (majorNodeVersion < 16 || (majorNodeVersion === 16 && minorNodeVersion < 17)) {
-	console.error('\033[1;31m*** Please use node.js versions >=16.17.x and <17.\033[0;0m');
-	err = true;
-}
-if (majorNodeVersion >= 17) {
-	console.warn('\033[1;31m*** Warning: Versions of node.js >= 17 have not been tested.\033[0;0m')
+if (!process.env['VSCODE_SKIP_NODE_VERSION_CHECK']) {
+	if (majorNodeVersion < 18 || (majorNodeVersion === 18 && minorNodeVersion < 15)) {
+		console.error('\x1b[1;31m*** Please use node.js versions >=18.15.x and <19.\x1b[0;0m');
+		err = true;
+	}
+	if (majorNodeVersion >= 19) {
+		console.warn('\x1b[1;31m*** Warning: Versions of node.js >= 19 have not been tested.\x1b[0;0m')
+	}
 }
 
 const path = require('path');
@@ -33,18 +35,18 @@ if (
 	) ||
 	majorYarnVersion >= 2
 ) {
-	console.error('\033[1;31m*** Please use yarn >=1.10.1 and <2.\033[0;0m');
+	console.error('\x1b[1;31m*** Please use yarn >=1.10.1 and <2.\x1b[0;0m');
 	err = true;
 }
 
 if (!/yarn[\w-.]*\.c?js$|yarnpkg$/.test(process.env['npm_execpath'])) {
-	console.error('\033[1;31m*** Please use yarn to install dependencies.\033[0;0m');
+	console.error('\x1b[1;31m*** Please use yarn to install dependencies.\x1b[0;0m');
 	err = true;
 }
 
 if (process.platform === 'win32') {
 	if (!hasSupportedVisualStudioVersion()) {
-		console.error('\033[1;31m*** Invalid C/C++ Compiler Toolchain. Please check https://github.com/microsoft/vscode/wiki/How-to-Contribute#prerequisites.\033[0;0m');
+		console.error('\x1b[1;31m*** Invalid C/C++ Compiler Toolchain. Please check https://github.com/microsoft/vscode/wiki/How-to-Contribute#prerequisites.\x1b[0;0m');
 		err = true;
 	}
 	if (!err) {

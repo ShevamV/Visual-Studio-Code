@@ -25,9 +25,9 @@ import { ILinkHoverTargetOptions, TerminalHover } from 'vs/workbench/contrib/ter
 import { TerminalWidgetManager } from 'vs/workbench/contrib/terminal/browser/widgets/widgetManager';
 import { IXtermCore } from 'vs/workbench/contrib/terminal/browser/xterm-private';
 import { ITerminalCapabilityStore } from 'vs/platform/terminal/common/capabilities/capabilities';
-import { ITerminalConfiguration, ITerminalProcessManager, TERMINAL_CONFIG_SECTION } from 'vs/workbench/contrib/terminal/common/terminal';
-import { IHoverAction } from 'vs/workbench/services/hover/browser/hover';
-import type { ILink, ILinkProvider, IViewportRange, Terminal } from 'xterm';
+import { ITerminalConfiguration, ITerminalProcessInfo, TERMINAL_CONFIG_SECTION } from 'vs/workbench/contrib/terminal/common/terminal';
+import { IHoverAction } from 'vs/platform/hover/browser/hover';
+import type { ILink, ILinkProvider, IViewportRange, Terminal } from '@xterm/xterm';
 import { convertBufferRangeToViewport } from 'vs/workbench/contrib/terminalContrib/links/browser/terminalLinkHelpers';
 import { RunOnceScheduler } from 'vs/base/common/async';
 import { ITerminalLogService } from 'vs/platform/terminal/common/terminal';
@@ -45,9 +45,11 @@ export class TerminalLinkManager extends DisposableStore {
 	private readonly _externalLinkProviders: IDisposable[] = [];
 	private readonly _openers: Map<TerminalLinkType, ITerminalLinkOpener> = new Map();
 
+	externalProvideLinksCb?: OmitFirstArg<ITerminalExternalLinkProvider['provideLinks']>;
+
 	constructor(
 		private readonly _xterm: Terminal,
-		private readonly _processManager: ITerminalProcessManager,
+		private readonly _processInfo: ITerminalProcessInfo,
 		capabilities: ITerminalCapabilityStore,
 		private readonly _linkResolver: ITerminalLinkResolver,
 		@IConfigurationService private readonly _configurationService: IConfigurationService,
@@ -65,16 +67,16 @@ export class TerminalLinkManager extends DisposableStore {
 				enableFileLinks = false;
 				break;
 			case 'notRemote':
-				enableFileLinks = !this._processManager.remoteAuthority;
+				enableFileLinks = !this._processInfo.remoteAuthority;
 				break;
 		}
 
 		// Setup link detectors in their order of priority
-		this._setupLinkDetector(TerminalUriLinkDetector.id, this._instantiationService.createInstance(TerminalUriLinkDetector, this._xterm, this._processManager, this._linkResolver));
 		if (enableFileLinks) {
-			this._setupLinkDetector(TerminalMultiLineLinkDetector.id, this._instantiationService.createInstance(TerminalMultiLineLinkDetector, this._xterm, this._processManager, this._linkResolver));
-			this._setupLinkDetector(TerminalLocalLinkDetector.id, this._instantiationService.createInstance(TerminalLocalLinkDetector, this._xterm, capabilities, this._processManager, this._linkResolver));
+			this._setupLinkDetector(TerminalMultiLineLinkDetector.id, this._instantiationService.createInstance(TerminalMultiLineLinkDetector, this._xterm, this._processInfo, this._linkResolver));
+			this._setupLinkDetector(TerminalLocalLinkDetector.id, this._instantiationService.createInstance(TerminalLocalLinkDetector, this._xterm, capabilities, this._processInfo, this._linkResolver));
 		}
+		this._setupLinkDetector(TerminalUriLinkDetector.id, this._instantiationService.createInstance(TerminalUriLinkDetector, this._xterm, this._processInfo, this._linkResolver));
 		this._setupLinkDetector(TerminalWordLinkDetector.id, this.add(this._instantiationService.createInstance(TerminalWordLinkDetector, this._xterm)));
 
 		// Setup link openers
@@ -83,14 +85,16 @@ export class TerminalLinkManager extends DisposableStore {
 		this._openers.set(TerminalBuiltinLinkType.LocalFile, localFileOpener);
 		this._openers.set(TerminalBuiltinLinkType.LocalFolderInWorkspace, localFolderInWorkspaceOpener);
 		this._openers.set(TerminalBuiltinLinkType.LocalFolderOutsideWorkspace, this._instantiationService.createInstance(TerminalLocalFolderOutsideWorkspaceLinkOpener));
-		this._openers.set(TerminalBuiltinLinkType.Search, this._instantiationService.createInstance(TerminalSearchLinkOpener, capabilities, this._processManager.initialCwd, localFileOpener, localFolderInWorkspaceOpener, () => this._processManager.os || OS));
-		this._openers.set(TerminalBuiltinLinkType.Url, this._instantiationService.createInstance(TerminalUrlLinkOpener, !!this._processManager.remoteAuthority));
+		this._openers.set(TerminalBuiltinLinkType.Search, this._instantiationService.createInstance(TerminalSearchLinkOpener, capabilities, this._processInfo.initialCwd, localFileOpener, localFolderInWorkspaceOpener, () => this._processInfo.os || OS));
+		this._openers.set(TerminalBuiltinLinkType.Url, this._instantiationService.createInstance(TerminalUrlLinkOpener, !!this._processInfo.remoteAuthority));
 
 		this._registerStandardLinkProviders();
 
 		let activeHoverDisposable: IDisposable | undefined;
 		let activeTooltipScheduler: RunOnceScheduler | undefined;
 		this.add(toDisposable(() => {
+			this._clearLinkProviders();
+			dispose(this._externalLinkProviders);
 			activeHoverDisposable?.dispose();
 			activeTooltipScheduler?.dispose();
 		}));
@@ -132,8 +136,8 @@ export class TerminalLinkManager extends DisposableStore {
 	}
 
 	private _setupLinkDetector(id: string, detector: ITerminalLinkDetector, isExternal: boolean = false): ILinkProvider {
-		const detectorAdapter = this._instantiationService.createInstance(TerminalLinkDetectorAdapter, detector);
-		detectorAdapter.onDidActivateLink(e => {
+		const detectorAdapter = this.add(this._instantiationService.createInstance(TerminalLinkDetectorAdapter, detector));
+		this.add(detectorAdapter.onDidActivateLink(e => {
 			// Prevent default electron link handling so Alt+Click mode works normally
 			e.event?.preventDefault();
 			// Require correct modifier on click unless event is coming from linkQuickPick selection
@@ -147,8 +151,8 @@ export class TerminalLinkManager extends DisposableStore {
 			} else {
 				this._openLink(e.link);
 			}
-		});
-		detectorAdapter.onDidShowHover(e => this._tooltipCallback(e.link, e.viewportRange, e.modifierDownCallback, e.modifierUpCallback));
+		}));
+		this.add(detectorAdapter.onDidShowHover(e => this._tooltipCallback(e.link, e.viewportRange, e.modifierDownCallback, e.modifierUpCallback)));
 		if (!isExternal) {
 			this._standardLinkProviders.set(id, detectorAdapter);
 		}
@@ -347,20 +351,28 @@ export class TerminalLinkManager extends DisposableStore {
 	}
 
 	private _registerStandardLinkProviders(): void {
+		// Forward any external link provider requests to the registered provider if it exists. This
+		// helps maintain the relative priority of the link providers as it's defined by the order
+		// in which they're registered in xterm.js.
+		//
+		/**
+		 * There's a bit going on here but here's another view:
+		 * - {@link externalProvideLinksCb} The external callback that gives the links (eg. from
+		 *   exthost)
+		 * - {@link proxyLinkProvider} A proxy that forwards the call over to
+		 *   {@link externalProvideLinksCb}
+		 * - {@link wrappedLinkProvider} Wraps the above in an `TerminalLinkDetectorAdapter`
+		 */
+		const proxyLinkProvider: OmitFirstArg<ITerminalExternalLinkProvider['provideLinks']> = async (bufferLineNumber) => {
+			return this.externalProvideLinksCb?.(bufferLineNumber);
+		};
+		const detectorId = `extension-${this._externalLinkProviders.length}`;
+		const wrappedLinkProvider = this._setupLinkDetector(detectorId, new TerminalExternalLinkDetector(detectorId, this._xterm, proxyLinkProvider), true);
+		this._linkProvidersDisposables.push(this._xterm.registerLinkProvider(wrappedLinkProvider));
+
 		for (const p of this._standardLinkProviders.values()) {
 			this._linkProvidersDisposables.push(this._xterm.registerLinkProvider(p));
 		}
-	}
-
-	registerExternalLinkProvider(provideLinks: OmitFirstArg<ITerminalExternalLinkProvider['provideLinks']>): IDisposable {
-		// Clear and re-register the standard link providers so they are a lower priority than the new one
-		this._clearLinkProviders();
-		const detectorId = `extension-${this._externalLinkProviders.length}`;
-		const wrappedLinkProvider = this._setupLinkDetector(detectorId, new TerminalExternalLinkDetector(detectorId, this._xterm, provideLinks), true);
-		const newLinkProvider = this._xterm.registerLinkProvider(wrappedLinkProvider);
-		this._externalLinkProviders.push(newLinkProvider);
-		this._registerStandardLinkProviders();
-		return newLinkProvider;
 	}
 
 	protected _isLinkActivationModifierDown(event: MouseEvent): boolean {
@@ -429,6 +441,6 @@ export interface ILineColumnInfo {
 export interface IDetectedLinks {
 	wordLinks?: ILink[];
 	webLinks?: ILink[];
-	fileLinks?: ILink[];
+	fileLinks?: (ILink | TerminalLink)[];
 	folderLinks?: ILink[];
 }

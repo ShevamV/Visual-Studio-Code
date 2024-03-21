@@ -6,7 +6,6 @@
 import * as nativeWatchdog from 'native-watchdog';
 import * as net from 'net';
 import * as minimist from 'minimist';
-import * as dns from 'dns';
 import * as performance from 'vs/base/common/performance';
 import type { MessagePortMain } from 'vs/base/parts/sandbox/node/electronTypes';
 import { isCancellationError, isSigPipeError, onUnexpectedError } from 'vs/base/common/errors';
@@ -47,15 +46,6 @@ interface ParsedExtHostArgs {
 	}
 })();
 
-// TODO(deepak1556): Remove this once
-// https://github.com/electron/electron/pull/39376
-// is available. The following API call is needed to get our
-// remote integration tests to pass.
-(function configureDnsResultOrder() {
-	// Refs https://github.com/microsoft/vscode/issues/189805
-	dns.setDefaultResultOrder('ipv4first');
-})();
-
 const args = minimist(process.argv.slice(2), {
 	boolean: [
 		'transformURIs',
@@ -86,6 +76,7 @@ const args = minimist(process.argv.slice(2), {
 
 // custom process.exit logic...
 const nativeExit: IExitFn = process.exit.bind(process);
+const nativeOn = process.on.bind(process);
 function patchProcess(allowExit: boolean) {
 	process.exit = function (code?: number) {
 		if (allowExit) {
@@ -107,6 +98,23 @@ function patchProcess(allowExit: boolean) {
 	// on the desktop.
 	// Refs https://github.com/microsoft/vscode/issues/151012#issuecomment-1156593228
 	process.env['ELECTRON_RUN_AS_NODE'] = '1';
+
+	process.on = <any>function (event: string, listener: (...args: any[]) => void) {
+		if (event === 'uncaughtException') {
+			listener = function () {
+				try {
+					return listener.call(undefined, arguments);
+				} catch {
+					// DO NOT HANDLE NOR PRINT the error here because this can and will lead to
+					// more errors which will cause error handling to be reentrant and eventually
+					// overflowing the stack. Do not be sad, we do handle and annotate uncaught
+					// errors properly in 'extensionHostMain'
+				}
+			};
+		}
+		nativeOn(event, listener);
+	};
+
 }
 
 interface IRendererConnection {
